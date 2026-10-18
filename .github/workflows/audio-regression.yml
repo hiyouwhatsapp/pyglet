@@ -1,0 +1,61 @@
+name: Pyodide regression verification
+on:
+  push:
+    branches: [verify/pyodide-audio-eos]
+permissions:
+  contents: read
+jobs:
+  browser-regression:
+    if: github.repository == 'hiyouwhatsapp/pyglet'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 279a5cc81b7fd56b686d5cff524ed55756a64dc3
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact source commit
+        run: test "$(git rev-parse HEAD)" = "279a5cc81b7fd56b686d5cff524ed55756a64dc3"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install playwright ruff==0.14.10
+          python -m playwright install --with-deps chromium
+      - name: Reproduce the callback error on original code
+        run: |
+          git show 10089a0a66f6d0827e0dfba94d01d578ce9481a3:pyglet/media/drivers/pyodide_js/adaptation.py > pyglet/media/drivers/pyodide_js/adaptation.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("tests/pyodide/pytest_runner.py")
+          text = path.read_text()
+          text = text.replace('    *test_files,', '    *test_files,\n    "-k", "test_audio_end_posts_eos",')
+          path.write_text(text)
+          PY
+          set +e
+          python tests/pyodide/run_pyodide_tests.py --clean --timeout-seconds 300 > baseline.log 2>&1
+          baseline_status=$?
+          set -e
+          cat baseline.log
+          test "$baseline_status" != 0
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          output = Path("baseline.log").read_text()
+          assert "test_audio_end_posts_eos" in output
+          assert re.search(r"TypeError:.*coroutine.*None", output), output[-5000:]
+          assert re.search(r"1 failed,.*deselected", output), output[-5000:]
+          PY
+          git restore --source=279a5cc81b7fd56b686d5cff524ed55756a64dc3 -- pyglet/media/drivers/pyodide_js/adaptation.py tests/pyodide/pytest_runner.py
+      - name: Complete Pyodide suite on fixed source
+        run: python tests/pyodide/run_pyodide_tests.py --clean --timeout-seconds 300
+      - name: Check Python errors in changed source
+        run: ruff check --select F401,F811,F821 pyglet/media/drivers/pyodide_js/adaptation.py
+      - name: Confirm verification did not change source
+        run: git diff --exit-code
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pyodide-regression-log
+          path: baseline.log
